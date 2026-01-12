@@ -1569,7 +1569,6 @@ classdef SimuMove < matlab.apps.AppBase
             %
 
             settings = app.trajectories(trajectoryID).Settings;
-            commands = app.trajectories(trajectoryID).Commands;
 
             % Get initial position
             initPos(1) = settings.StartPoseXEditField.Value;
@@ -1596,6 +1595,9 @@ classdef SimuMove < matlab.apps.AppBase
                 Tj = 0;
             end
 
+            % Extract commands
+            commands = app.extractCommands(trajectoryID, minCmdTime);
+
             % Generate setpoints
             setpoints = app.generateSetpoints(commands, Tacc, Tj, minCmdTime);
 
@@ -1605,23 +1607,40 @@ classdef SimuMove < matlab.apps.AppBase
             % Update plots
             app.updatePlots(trajectoryID, timeVec, stateVec, wheelVelVec);
         end
+
+        function commands = extractCommands(app, trajectoryID, minCmdTime)
+            commandStruct = app.trajectories(trajectoryID).Commands;
+
+            numCommands = length(commandStruct);
+            commands = zeros(numCommands, 4); % [vx, vy, omega, time]
+            for i = 1:numCommands
+                cmd = commandStruct{i};
+
+                if strcmp(cmd.TypeDropDown.Value, 'Move Command')
+                    % Move Command
+                    vel = cmd.Fields.velocityField.Value;
+                    alpha = deg2rad(cmd.Fields.alphaField.Value);
+                    
+                    commands(i, 1) = vel * cos(alpha);
+                    commands(i, 2) = vel * sin(alpha);
+                    commands(i, 3) = cmd.Fields.omegaField.Value;
+                else
+                    commands(i, :) = 0; % Unknown command type, set to zero
+                end
+                commands(i, 4) = max(round(cmd.Fields.timeField.Value / app.sampleTime) * app.sampleTime, minCmdTime);
+            end
+        end
         
         function setpoints = generateSetpoints(app, commands, Tacc, Tj, minCmdTime)
-
-            numSetpoints = 4 + numel(commands) * 4; % Start ramp + 4 per command
+            numCommands = size(commands, 1);
+            numSetpoints = 4 + numCommands * 4; % Start ramp + 4 per command
             setpoints = zeros(numSetpoints, 10); % [vx, vy, omega, ax, ay, alpha, jx, jy, psi, time]
 
             % Initial transition from rest to first command
-            cmd1 = commands{1};
             
             % Get command parameters
-            vel = cmd1.Fields.velocityField.Value;
-            alpha = deg2rad(cmd1.Fields.alphaField.Value);
-            omega = cmd1.Fields.omegaField.Value;
-            t_span = max(round(cmd1.Fields.timeField.Value / app.sampleTime) * app.sampleTime, minCmdTime);
-            vx = vel * cos(alpha);
-            vy = vel * sin(alpha);
-            V = [vx, vy, omega];
+            t_span = commands(1, 4);
+            V = commands(1, 1:3);
 
             % Adjust times if command time is shorter than acceleration + deceleration time
             [Tacc_cmd, Tj_cmd] = adjustTimes(app, t_span, Tacc * 2, Tacc, Tj);
@@ -1636,17 +1655,10 @@ classdef SimuMove < matlab.apps.AppBase
 
             Vi = V; % Initial velocity for next command
             Ti = t_span - Tacc_cmd; % Initial time for next transition
-            for i = 2:length(commands)
-                cmd = commands{i};
-                
+            for i = 2:numCommands
                 % Get command parameters
-                vel = cmd.Fields.velocityField.Value;
-                alpha = deg2rad(cmd.Fields.alphaField.Value);
-                omega = cmd.Fields.omegaField.Value;
-                t_span = max(round(cmd.Fields.timeField.Value / app.sampleTime) * app.sampleTime, minCmdTime);
-                vx = vel * cos(alpha);
-                vy = vel * sin(alpha);
-                V = [vx, vy, omega];
+                t_span = commands(i, 4);
+                V = commands(i, 1:3);
 
                 % Calculate setpoints for acceleration phase
                 [A_b, J_a, J_c, V_ib, V_ic] = computeProfileParams(Vi, V, Tacc_cmd, Tj_cmd);
@@ -1668,7 +1680,7 @@ classdef SimuMove < matlab.apps.AppBase
             % Calculate setpoints for acceleration phase
             [A_b, J_a, J_c, V_ib, V_ic] = computeProfileParams(Vi, [0, 0, 0], Tacc_cmd, Tj_cmd);
 
-            i = length(commands);
+            i = numCommands;
             setpoints(4*i + 1, :) = [Vi, 0, 0, 0, J_a, Ti];                     % Start from constant velocity, initial jerk phase
             setpoints(4*i + 2, :) = [V_ib, A_b, 0, 0, 0, Ti + Tj_cmd];          % End of initial jerk phase -> constant acceleration
             setpoints(4*i + 3, :) = [V_ic, A_b, J_c, Ti + Tacc_cmd - Tj_cmd];   % End of constant acceleration -> start of deceleration jerk
@@ -1763,19 +1775,14 @@ classdef SimuMove < matlab.apps.AppBase
                 stateVec(idx, 1, 1) = xg(1:end-1);
                 stateVec(idx, 2, 1) = yg(1:end-1);
 
+                err = [xg(end-1), yg(end-1), theta(end)] - getFinalPose(initPos, setpoints(i, 1:3), setpoints(i, 4:6), setpoints(i, 7:9), sectionTime(end));
+
                 initPos = [xg(end), yg(end), theta_f]; % Update initial position for next segment
             end
 
             stateVec(end, :, 1) = initPos; % Set final position
 
             wheelVelVec = app.inverseKinematics(stateVec(:, :, 2)')'; % Compute wheel velocities
-
-            function Vg = globalVelocity(t, theta_i, V, A, J)
-                theta = theta_i + V(:,3) .* t + A(:,3) .* t.^2 / 2 + J(:,3) .* t.^3 / 6;
-                vx = V(:,1) + A(:,1) .* t + J(:,1) .* t.^2 / 2;
-                vy = V(:,2) + A(:,2) .* t + J(:,2) .* t.^2 / 2;
-                Vg = [vx .* cos(theta) - vy .* sin(theta), vx .* sin(theta) + vy .* cos(theta)];
-            end
         end
 
         function [Wa, Wb, Wc] = inverseKinematics(app, Vx, Vy, Omega)
@@ -1931,4 +1938,16 @@ function fpath = getFilePath()
     path = mfilename('fullpath');
     idx = find(path == '\', 1, 'last');
     fpath = path(1:idx);
+end
+
+function pose = getFinalPose(iniPose, V, A, J, t)
+    pose(1:2) = integral(@(x) globalVelocity(x, iniPose(3), V, A, J), 0, t, 'ArrayValued', true) + iniPose(1:2);
+    pose(3) = iniPose(3) + V(3) * t + A(3) * t^2 / 2 + J(3) * t^3 / 6;
+end
+
+function Vg = globalVelocity(t, theta_i, V, A, J)
+    theta = theta_i + V(:,3) .* t + A(:,3) .* t.^2 / 2 + J(:,3) .* t.^3 / 6;
+    vx = V(:,1) + A(:,1) .* t + J(:,1) .* t.^2 / 2;
+    vy = V(:,2) + A(:,2) .* t + J(:,2) .* t.^2 / 2;
+    Vg = [vx .* cos(theta) - vy .* sin(theta), vx .* sin(theta) + vy .* cos(theta)];
 end
