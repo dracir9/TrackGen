@@ -1,0 +1,12 @@
+#
+# Matlab autosave files
+#
+*.asv
+
+back.png
+folder.png
+
+/Trajectories/*
+!/Trajectories/.gitkeep
+
+/Tests/*
