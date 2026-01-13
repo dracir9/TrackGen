@@ -1735,8 +1735,9 @@ classdef SimuMove < matlab.apps.AppBase
             timeVec = (0:Ts:(numSteps-1)*Ts)';
 
             stateVec = zeros(numSteps, 3, 4); % [x/y/theta, vx/vy/omega, ax/ay/alpha, jx/jy/psi]
-
-            refTime = setpoints(:, end) - Ts/2; % Shift times to center of sample period
+            
+            % Shift times to center of sample period to avoid rounding errors
+            refTime = setpoints(:, end) - Ts/2; 
             for i = 1:size(setpoints, 1) - 1
                 idx = timeVec >= refTime(i) & timeVec < refTime(i+1);
 
@@ -1745,6 +1746,7 @@ classdef SimuMove < matlab.apps.AppBase
                 end
 
                 sectionTime = timeVec(idx) - timeVec(find(idx, 1));
+                Tend = sectionTime(end) + Ts;
 
                 stateVec(idx, 1, 4) = setpoints(i, 7); % jx
                 stateVec(idx, 2, 4) = setpoints(i, 8); % jy
@@ -1754,11 +1756,10 @@ classdef SimuMove < matlab.apps.AppBase
 
                 stateVec(idx, :, 2) = setpoints(i, 1:3) + setpoints(i, 4:6) .* sectionTime + setpoints(i, 7:9) .* sectionTime.^2/2; % vx, vy, omega
 
-                theta = initPos(3) + setpoints(i, 3) .* sectionTime + setpoints(i, 6) .* sectionTime.^2/2 + setpoints(i, 9) .* sectionTime.^3/6; % theta
-                stateVec(idx, 3, 1) = theta;
+                stateVec(idx, 3, 1) = initPos(3) + setpoints(i, 3) .* sectionTime + setpoints(i, 6) .* sectionTime.^2/2 + setpoints(i, 9) .* sectionTime.^3/6; % theta
 
                 % Final orientation after this segment
-                theta_f = theta(end) + setpoints(i, 3) * Ts + setpoints(i, 6) * Ts^2 / 2 + setpoints(i, 9) * Ts^3 / 6;
+                theta_f = initPos(3) + setpoints(i, 3) * Tend + setpoints(i, 6) * Tend^2 / 2 + setpoints(i, 9) * Tend^3 / 6;
                 
                 % Compute global velocities
                 Vg_ini = globalVelocity(0, stateVec(idx, 3, 1), stateVec(idx, :, 2), stateVec(idx, :, 3), stateVec(idx, :, 4));
@@ -1774,8 +1775,6 @@ classdef SimuMove < matlab.apps.AppBase
 
                 stateVec(idx, 1, 1) = xg(1:end-1);
                 stateVec(idx, 2, 1) = yg(1:end-1);
-
-                err = [xg(end-1), yg(end-1), theta(end)] - getFinalPose(initPos, setpoints(i, 1:3), setpoints(i, 4:6), setpoints(i, 7:9), sectionTime(end));
 
                 initPos = [xg(end), yg(end), theta_f]; % Update initial position for next segment
             end
