@@ -1596,10 +1596,10 @@ classdef SimuMove < matlab.apps.AppBase
             end
 
             % Extract commands
-            commands = app.extractCommands(trajectoryID, minCmdTime);
+            commands = app.extractCommands(trajectoryID, initPos, Tacc, Tj, minCmdTime);
 
             % Generate setpoints
-            setpoints = app.generateSetpoints(commands, Tacc, Tj, minCmdTime);
+            setpoints = app.generateSetpoints(commands, Tacc, Tj);
 
             % Simulate trajectory
             [timeVec, stateVec, wheelVelVec] = app.simulateTrajectory(setpoints, initPos);
@@ -1608,77 +1608,100 @@ classdef SimuMove < matlab.apps.AppBase
             app.updatePlots(trajectoryID, timeVec, stateVec, wheelVelVec);
         end
 
-        function commands = extractCommands(app, trajectoryID, minCmdTime)
+        function commands = extractCommands(app, trajectoryID, initPos, Tacc, Tj, minCmdTime)
             commandStruct = app.trajectories(trajectoryID).Commands;
+
+            v_i = [0, 0, 0]; % Initial velocity
+            A = [0, 0, 0]; % Initial acceleration
 
             numCommands = length(commandStruct);
             commands = zeros(numCommands, 4); % [vx, vy, omega, time]
             for i = 1:numCommands
                 cmd = commandStruct{i};
 
-                if strcmp(cmd.TypeDropDown.Value, 'Move Command')
-                    % Move Command
-                    vel = cmd.Fields.velocityField.Value;
-                    alpha = deg2rad(cmd.Fields.alphaField.Value);
-                    
-                    commands(i, 1) = vel * cos(alpha);
-                    commands(i, 2) = vel * sin(alpha);
-                    commands(i, 3) = cmd.Fields.omegaField.Value;
-                else
-                    commands(i, :) = 0; % Unknown command type, set to zero
+                switch cmd.TypeDropDown.Value
+                    case 'Move Command'
+                        % Move Command
+                        vel = cmd.Fields.velocityField.Value;
+                        alpha = deg2rad(cmd.Fields.alphaField.Value);
+                        
+                        commands(i, 1) = vel * cos(alpha);
+                        commands(i, 2) = vel * sin(alpha);
+                        commands(i, 3) = cmd.Fields.omegaField.Value;
+                        commands(i, 4) = round(cmd.Fields.timeField.Value / app.sampleTime) * app.sampleTime;
+
+                        % Calculate final position after this command
+                        [Tacc_cmd, Tj_cmd] = getAdjustedTimes(app.sampleTime, commands(i, 4), Tacc, Tacc, Tj);
+                        initPos = getProfileFinalPose(initPos, v_i, A, commands(i, 1:3), A, commands(i, 1:3), Tacc_cmd, 0, Tj_cmd, 0, commands(i, 4));
+                        v_i = commands(i, 1:3); % Update initial velocity for next command
+                    case 'Position Command by time'
+                        % Position Command by time
+                        xf = cmd.Fields.xPosField.Value;
+                        yf = cmd.Fields.yPosField.Value;
+                        theta = deg2rad(cmd.Fields.thetaField.Value);
+                        t = round(cmd.Fields.timeField.Value / app.sampleTime) * app.sampleTime;
+
+                        % Get motion command to reach desired position in given time
+                        if i < numCommands
+                            [Tacc_cmd, Tj_cmd] = getAdjustedTimes(app.sampleTime, t, Tacc, Tacc, Tj);
+                            [v, a, w] = getMotionCommandByTime(t, initPos, [xf, yf, theta], ...
+                                        v_i, A, v_i, A, Tacc_cmd, 0, Tj_cmd, 0, rotationDirection='free');
+                        else
+                            [Tacc_cmd, Tj_cmd] = getAdjustedTimes(app.sampleTime, t, Tacc*2, Tacc, Tj);
+                            [v, a, w] = getMotionCommandByTime(t, initPos, [xf, yf, theta], ...
+                                        v_i, A, [0 0 0], A, Tacc_cmd, Tacc_cmd, Tj_cmd, Tj_cmd, rotationDirection='free');
+                        end
+                        initPos = [xf, yf, theta];
+                        v_i = [v * cos(a), v * sin(a), w]; % Update initial velocity for next command
+                        
+                        commands(i, 1) = v_i(1);
+                        commands(i, 2) = v_i(2);
+                        commands(i, 3) = v_i(3);
+                        commands(i, 4) = t;
+                    otherwise
+                        commands(i, :) = 0; % Unknown command type, set to zero
                 end
-                commands(i, 4) = max(round(cmd.Fields.timeField.Value / app.sampleTime) * app.sampleTime, minCmdTime);
+                commands(i, 4) = max(commands(i, 4), minCmdTime);
             end
         end
         
-        function setpoints = generateSetpoints(app, commands, Tacc, Tj, minCmdTime)
+        function setpoints = generateSetpoints(app, commands, Tacc, Tj)
             numCommands = size(commands, 1);
             numSetpoints = 4 + numCommands * 4; % Start ramp + 4 per command
             setpoints = zeros(numSetpoints, 10); % [vx, vy, omega, ax, ay, alpha, jx, jy, psi, time]
 
-            % Initial transition from rest to first command
-            
-            % Get command parameters
-            t_span = commands(1, 4);
-            V = commands(1, 1:3);
-
-            % Adjust times if command time is shorter than acceleration + deceleration time
-            [Tacc_cmd, Tj_cmd] = adjustTimes(app, t_span, Tacc * 2, Tacc, Tj);
-
-            % Calculate setpoints for acceleration phase
-            [A_b, J_a, J_c, V_ib, V_ic] = computeProfileParams([0, 0, 0], V, Tacc_cmd, Tj_cmd);
-
-            setpoints(1, :) = [0, 0, 0, 0, 0, 0, J_a, 0];           % Start from rest, initial jerk phase
-            setpoints(2, :) = [V_ib, A_b, 0, 0, 0, Tj_cmd];         % End of initial jerk phase -> constant acceleration
-            setpoints(3, :) = [V_ic, A_b, J_c, Tacc_cmd - Tj_cmd];  % End of constant acceleration -> start of deceleration jerk
-            setpoints(4, :) = [V, 0, 0, 0, 0, 0, 0, Tacc_cmd];      % End of deceleration jerk -> constant velocity
-
-            Vi = V; % Initial velocity for next command
-            Ti = t_span - Tacc_cmd; % Initial time for next transition
-            for i = 2:numCommands
+            Vi = [0 0 0]; % Initial velocity
+            Ti = 0; % Initial time
+            for i = 1:numCommands
                 % Get command parameters
                 t_span = commands(i, 4);
                 V = commands(i, 1:3);
 
+                if i < numCommands
+                    t_lim = Tacc;
+                else
+                    t_lim = Tacc * 2;
+                end
+
+                % Adjust times if command time is shorter than acceleration
+                [Tacc_cmd, Tj_cmd] = getAdjustedTimes(app.sampleTime, t_span, t_lim, Tacc, Tj);
                 % Calculate setpoints for acceleration phase
-                [A_b, J_a, J_c, V_ib, V_ic] = computeProfileParams(Vi, V, Tacc_cmd, Tj_cmd);
+                [A_b, J_a, J_c, V_ib, V_ic] = computeTransitionParams(Vi, V, Tacc_cmd, Tj_cmd);
 
                 setpoints(4*(i-1) + 1, :) = [Vi, 0, 0, 0, J_a, Ti];                     % Start from constant velocity, initial jerk phase
                 setpoints(4*(i-1) + 2, :) = [V_ib, A_b, 0, 0, 0, Ti + Tj_cmd];          % End of initial jerk phase -> constant acceleration
                 setpoints(4*(i-1) + 3, :) = [V_ic, A_b, J_c, Ti + Tacc_cmd - Tj_cmd];   % End of constant acceleration -> start of deceleration jerk
                 setpoints(4*(i-1) + 4, :) = [V, 0, 0, 0, 0, 0, 0, Ti + Tacc_cmd];       % End of deceleration jerk -> constant velocity
 
-                % Adjust times if command time is shorter than transition time
-                Tf = Ti + Tacc_cmd;
-                [Tacc_cmd, Tj_cmd] = adjustTimes(app, t_span, Tacc, Tacc, Tj);
                 Vi = V; % Initial velocity for next command
-                Ti = Tf + t_span - Tacc_cmd; % Initial time for next command
+                Ti = Ti + t_span; % Initial time for next command
             end
+            Ti = Ti-Tacc_cmd; % Adjust time for final transition
 
             % Final transition from last command to rest
 
             % Calculate setpoints for acceleration phase
-            [A_b, J_a, J_c, V_ib, V_ic] = computeProfileParams(Vi, [0, 0, 0], Tacc_cmd, Tj_cmd);
+            [A_b, J_a, J_c, V_ib, V_ic] = computeTransitionParams(Vi, [0, 0, 0], Tacc_cmd, Tj_cmd);
 
             i = numCommands;
             setpoints(4*i + 1, :) = [Vi, 0, 0, 0, J_a, Ti];                     % Start from constant velocity, initial jerk phase
@@ -1686,24 +1709,7 @@ classdef SimuMove < matlab.apps.AppBase
             setpoints(4*i + 3, :) = [V_ic, A_b, J_c, Ti + Tacc_cmd - Tj_cmd];   % End of constant acceleration -> start of deceleration jerk
             setpoints(4*i + 4, :) = [0, 0, 0, 0, 0, 0, 0, 0, 0, Ti + Tacc_cmd]; % End of deceleration jerk -> rest
 
-            function [Tacc_cmd, Tj_cmd] = adjustTimes(app, t_span, t_lim, Tacc, Tj)
-                if t_span < t_lim && Tacc > 0
-                    % Adjust acceleration times proportionally
-                    scale = t_span / t_lim;
-                    Tacc_cmd = max(round(Tacc * scale / app.sampleTime) * app.sampleTime, app.sampleTime);
-
-                    if Tj > 0
-                        Tj_cmd = max(round(Tj * scale / app.sampleTime) * app.sampleTime, app.sampleTime);
-                    else
-                        Tj_cmd = 0;
-                    end
-                else
-                    Tacc_cmd = Tacc;
-                    Tj_cmd = Tj;
-                end
-            end
-
-            function [A_b, J_a, J_c, V_ib, V_ic] = computeProfileParams(Vi, Vf, Tacc_cmd, Tj_cmd)
+            function [A_b, J_a, J_c, V_ib, V_ic] = computeTransitionParams(Vi, Vf, Tacc_cmd, Tj_cmd)
                 if Tacc_cmd == 0
                     A_b = zeros(size(Vf));
                     J_a = zeros(size(Vf));
@@ -1939,9 +1945,319 @@ function fpath = getFilePath()
     fpath = path(1:idx);
 end
 
+function [Tacc_cmd, Tj_cmd] = getAdjustedTimes(Ts, t_span, t_lim, Tacc, Tj)
+    if t_span < t_lim && Tacc > 0
+        % Adjust acceleration times
+        scale = t_span / t_lim;
+        if Tj > 0
+            Tacc_cmd = max(round(Tacc * scale / Ts) * Ts, Ts*2);
+            Tj_cmd = max(round(Tj * scale / Ts) * Ts, Ts);
+        else
+            Tacc_cmd = max(round(Tacc * scale / Ts) * Ts, Ts);
+            Tj_cmd = 0;
+        end
+    else
+        Tacc_cmd = Tacc;
+        Tj_cmd = Tj;
+    end
+end
+
+function [vel, alpha, omega, t, d] = getMotionCommand(vel, pIni, pEnd, angVelocity, rotDir)
+%GETMOTIONCOMMAND Calculate the required motion command to reach the target in a single move.
+%   Syntax:
+%   [vel, alpha, omega, t, lineTime] = GETMOTIONCOMMAND(vel,initialPos,finalPos,defaultOmega)
+%
+%   [vel, alpha, omega, t, lineTime] = GETMOTIONCOMMAND(vel,initialPos,finalPos,defaultOmega,rotationDirection)
+%
+% Inputs:
+%   vel                 - Linear velocity
+%   initialPos          - Initial robot position expressed as a 3-element
+%                           vector representing the X, Y and theta coordinates
+%   finalPos            - Desired final position
+%   defaultOmega        - Default omega used for rotation only movements.
+%                           It can be defined as a 2 element vector
+%                           containing [defaultOmega, maximumOmega]
+%   rotationDirection   - Can be either 'clockwise' or 'counterclockwise'.
+%                           If ommitted the shortest rotation is used.
+%
+% Outputs:
+%   vel     - Linear velocity (in m/s)
+%   alpha   - Movement direction (in rad)
+%   omega   - Rotational velocity (in rad/s)
+%   t       - Movement duration (in seconds)
+%   d       - Distance to target in a straight line
+
+    beta = rem(pEnd(3)-pIni(3), 2*pi);
+
+    % Parse input
+    % If no rotation direction is specified choose the shortest
+    if nargin < 5
+        if beta > pi
+            beta = beta-2*pi;
+        elseif beta < -pi
+            beta = beta+2*pi;
+        end
+        if beta > 0
+            rotDir = 'counterclockwise';
+        else
+            rotDir = 'clockwise';
+        end
+    end
+
+    % Rotation only
+    if abs(pEnd(1) - pIni(1)) < 1e-3 && abs(pEnd(2) - pIni(2)) < 1e-3
+        omega = abs(angVelocity(1))*sign(beta);
+        alpha = 0;
+        vel = 0;
+    else
+    % Rotation + translation
+        switch lower(rotDir)
+            case 'clockwise'
+                if beta > 0
+                    beta = beta-2*pi;
+                end
+                vel = -abs(vel);
+            case 'counterclockwise'
+                if beta < 0
+                    beta = beta+2*pi;
+                end
+                vel = abs(vel);
+            otherwise
+                error(['Unknown rotation direction ''%s''. It must be either ' ...
+                    '''clockwise'' or ''counterclockwise'''], rotDir)
+        end
+        
+        % Radius of arc
+        % For beta == 0 -> R = Inf
+        R = sqrt(((pEnd(1)-pIni(1))^2 + (pEnd(2)-pIni(2))^2)/(2*(1-cos(beta))));
+        % Division by Inf results in 0
+        omega = vel/R;
+        alpha = atan2(pEnd(2)-pIni(2), pEnd(1)-pIni(1)) - pIni(3) - beta/2;
+        alpha = mod(alpha + pi, 2*pi) - pi; % Normalize between -pi and +pi (-180º to 180º)
+
+        if numel(angVelocity) > 1 && abs(omega) > angVelocity(2)
+            omega = abs(angVelocity(2))*sign(omega);
+            vel = abs(omega*R);
+        else
+            vel = abs(vel);
+        end
+    end
+
+    d = hypot(pEnd(1)-pIni(1), pEnd(2)-pIni(2));
+    if abs(omega) < 1e-3
+        t = d/vel;
+    else
+        t = beta/omega;
+    end
+    assert(t >= 0, 'Invalid time')
+end
+
+function [vel, alpha, omega] = getMotionCommandByTime(t_mov, pIni, pEnd, v_i, a_i, v_f, a_f, t_acc, t_dec, t_j_A, t_j_D, options)
+%GETMOTIONCOMMANDBYTIME Calculate the required motion command to reach the target in a single move in the specified time.
+%   Syntax:
+%   [vel, alpha, omega, t, lineTime] = GETMOTIONCOMMANDBYTIME(t,initialPos,finalPos,)
+%
+%   [vel, alpha, omega, t, lineTime] = GETMOTIONCOMMANDBYTIME(t,initialPos,finalPos,rotationDirection)
+%
+% Inputs:
+%   t                   - Movement duration (in seconds)
+%   initialPos          - Initial robot position expressed as a 3-element
+%                           vector representing the X, Y and theta coordinates
+%   finalPos            - Desired final position
+%   rotationDirection   - Can be either 'clockwise' or 'counterclockwise'.
+%                           If ommitted the shortest rotation is used.
+%
+% Outputs:
+%   vel     - Linear velocity (in m/s)
+%   alpha   - Movement direction (in rad)
+%   omega   - Rotational velocity (in rad/s)
+%   t       - Movement duration (in seconds)
+%   d       - Distance to target in a straight line
+
+    arguments
+        t_mov   (1,1)   double  {mustBeNonnegative}
+        pIni    (1,3)   double
+        pEnd    (1,3)   double
+        v_i     (1,3)   double = [0,0,0]
+        a_i     (1,3)   double = [0,0,0]
+        v_f     (1,3)   double = [0,0,0]
+        a_f     (1,3)   double = [0,0,0]
+        t_acc   (1,1)   double = 0
+        t_dec   (1,1)   double = 0
+        t_j_A   (1,1)   double = 0
+        t_j_D   (1,1)   double = 0
+        options.rotationDirection {mustBeTextScalar} = 'shortest'
+    end
+
+    % Parse input
+    switch lower(options.rotationDirection)
+        case 'clockwise'
+            beta = rem(pEnd(3)-pIni(3), 2*pi);
+            if beta > 0
+                beta = beta-2*pi;
+            end
+        case 'counterclockwise'
+            beta = rem(pEnd(3)-pIni(3), 2*pi);
+            if beta < 0
+                beta = beta+2*pi;
+            end
+        case 'shortest'
+            beta = rem(pEnd(3)-pIni(3), 2*pi);
+            if beta > pi
+                beta = beta-2*pi;
+            elseif beta < -pi
+                beta = beta+2*pi;
+            end
+        case 'free'
+            beta = pEnd(3)-pIni(3);
+        otherwise
+            error(['Unknown rotation direction ''%s''. It must be either ' ...
+                '''clockwise'', ''counterclockwise'', ''shortest'' or ''free'''], options.rotationDirection)
+    end
+
+    % Calculate required omega
+    omega = (- 2*a_i(3)*t_j_A^2 + 3*a_i(3)*t_acc*t_j_A + 2*a_f(3)*t_j_D^2 - 3*a_f(3)*t_dec*t_j_D - 12*beta + 6*t_acc*v_i(3) + 6*t_dec*v_f(3))/(6*(t_acc + t_dec - 2*t_mov));
+
+    dist = hypot(pEnd(1)-pIni(1), pEnd(2)-pIni(2));
+    % Rotation only
+    if dist < 1e-3
+        alpha = 0;
+        vel = 0;
+    else
+    % Rotation + translation
+        beta = rem(beta, 2*pi);
+        % Ideal motion with instant acceleration
+        % Radius of arc
+        % For beta == 0 -> R = Inf
+        R = sqrt(((pEnd(1)-pIni(1))^2 + (pEnd(2)-pIni(2))^2)/(2*(1-cos(beta))));
+
+        vel = abs(omega*R);
+
+        if isnan(vel) || isinf(vel)
+            vel = dist/t_mov;
+        end
+
+        alpha = atan2(pEnd(2)-pIni(2), pEnd(1)-pIni(1)) - pIni(3) - beta/2;
+        alpha = mod(alpha + pi, 2*pi) - pi; % Normalize between -pi and +pi (-180º to 180º)
+
+        if t_acc + t_dec > 0
+            % Motion profile with acceleration and deceleration
+            % Uses ideal motion as initial guess
+            vx_i = vel * cos(alpha);
+            vy_i = vel * sin(alpha);
+
+            opts = optimoptions("fsolve", "Display", "off");
+            V_cr = fsolve(@fun, [vx_i, vy_i], opts);
+
+            vel = hypot(V_cr(1), V_cr(2));
+            alpha = atan2(V_cr(2), V_cr(1));
+        end
+    end
+
+    function ret = fun(V)
+        tmp = getProfileFinalPose(pIni, v_i, a_i, v_f, a_f, [V(1), V(2), omega], t_acc, t_dec, t_j_A, t_j_D, t_mov) - pEnd;
+        ret = [tmp(1); tmp(2)];
+    end
+end
+
+function pose = getProfileFinalPose(iniPose, v_i, a_i, v_f, a_f, v_cr, t_acc, t_dec, t_j_A, t_j_D, t_mov)
+    arguments
+        iniPose (1,3) double
+        v_i     (1,3) double
+        a_i     (1,3) double
+        v_f     (1,3) double
+        a_f     (1,3) double
+        v_cr    (1,3) double
+        t_acc   (1,1) double
+        t_dec   (1,1) double
+        t_j_A   (1,1) double
+        t_j_D   (1,1) double
+        t_mov   (1,1) double
+    end
+
+    t_A = t_j_A;
+    t_B = t_acc - 2*t_j_A;
+    t_C = t_A;
+    t_D = t_mov - t_acc - t_dec;
+    t_E = t_j_D;
+    t_F = t_dec - 2*t_j_D;
+    t_G = t_E;
+
+    % Initial ramp
+    if t_acc > 0
+        v_iB = v_i + a_i.*t_j_A - (t_j_A.*(a_i + (v_i - v_cr + (a_i.*t_j_A)/2)./(t_acc - t_j_A)))/2;
+        v_iC = (4*t_acc.*v_cr - 6*t_j_A.*v_cr + 2*t_j_A.*v_i + a_i.*t_j_A.^2)./(4*(t_acc - t_j_A));
+
+        a_B = -(v_i - v_cr + (a_i.*t_j_A)/2)/(t_acc - t_j_A);
+        
+        j_A = -(a_i + (v_i - v_cr + (a_i.*t_j_A)/2)/(t_acc - t_j_A))/t_j_A;
+        j_C = (v_i - v_cr + (a_i.*t_j_A)/2)/(t_j_A*(t_acc - t_j_A));
+
+        poseA = getFinalPose(iniPose, v_i, a_i, j_A, t_A); % Phase A
+        poseB = getFinalPose(poseA, v_iB, a_B, [0,0,0], t_B); % Phase B
+        poseC = getFinalPose(poseB, v_iC, a_B, j_C, t_C); % Phase C
+    else
+        poseC = iniPose;
+    end
+
+    % Constant velocity phase
+    poseD = getFinalPose(poseC, v_cr, [0,0,0], [0,0,0], t_D); % Phase D
+
+    % Final ramp
+    if t_dec > 0
+        a_F = -(v_cr - v_f + (a_f.*t_j_D)/2)/(t_dec - t_j_D);
+
+        j_E = -(v_cr - v_f + (a_f.*t_j_D)/2)/(t_j_D*(t_dec - t_j_D));
+        j_G = (a_f + (v_cr - v_f + (a_f.*t_j_D)/2)/(t_dec - t_j_D))/t_j_D;
+
+        v_iF = v_cr - (t_j_D.*(v_cr - v_f + (a_f.*t_j_D)/2))./(2*(t_dec - t_j_D));
+        v_iG = (4*t_dec.*v_f + 2*t_j_D.*v_cr - 6*t_j_D.*v_f + 3*a_f.*t_j_D.^2 - 2*a_f.*t_dec.*t_j_D)./(4*(t_dec - t_j_D));
+
+        poseE = getFinalPose(poseD, v_cr, [0,0,0], j_E, t_E); % Phase E
+        poseF = getFinalPose(poseE, v_iF, a_F, [0,0,0], t_F); % Phase F
+        pose = getFinalPose(poseF, v_iG, a_F, j_G, t_G); % Phase G
+    else
+        pose = poseD;
+    end
+end
+
 function pose = getFinalPose(iniPose, V, A, J, t)
-    pose(1:2) = integral(@(x) globalVelocity(x, iniPose(3), V, A, J), 0, t, 'ArrayValued', true) + iniPose(1:2);
-    pose(3) = iniPose(3) + V(3) * t + A(3) * t^2 / 2 + J(3) * t^3 / 6;
+    if V(3) == 0 && A(3) == 0 && J(3) == 0
+        % No rotation
+        pose(1) = iniPose(1) + (V(1)*cos(iniPose(3)) - V(2)*sin(iniPose(3)))*t + (A(1)*cos(iniPose(3)) - A(2)*sin(iniPose(3)))*t^2/2 + (J(1)*cos(iniPose(3)) - J(2)*sin(iniPose(3)))*t^3/6;
+        pose(2) = iniPose(2) + (V(1)*sin(iniPose(3)) + V(2)*cos(iniPose(3)))*t + (A(1)*sin(iniPose(3)) + A(2)*cos(iniPose(3)))*t^2/2 + (J(1)*sin(iniPose(3)) + J(2)*cos(iniPose(3)))*t^3/6;
+        pose(3) = iniPose(3);
+    elseif A(3) == 0 && J(3) == 0
+        % Constant angular velocity
+        theta_i = iniPose(3);
+        v_x_i = V(1);
+        v_y_i = V(2);
+        omega = V(3);
+        a_x = A(1);
+        a_y = A(2);
+        j_x = J(1);
+        j_y = J(2);
+        K1 = iniPose(1) + (sin(theta_i)*(- v_x_i*omega^2 + a_y*omega + j_x))/omega^3 - (cos(theta_i)*(v_y_i*omega^2 + a_x*omega - j_y))/omega^3;
+        K2 = iniPose(2) - (cos(theta_i)*(- v_x_i*omega^2 + a_y*omega + j_x))/omega^3 - (sin(theta_i)*(v_y_i*omega^2 + a_x*omega - j_y))/omega^3;
+        pose(1) = K1 - (sin(theta_i + omega*t)*(- v_x_i*omega^2 + a_y*omega + j_x))/omega^3 + (cos(theta_i + omega*t)*(v_y_i*omega^2 + a_x*omega - j_y))/omega^3 + ...
+            (t*cos(theta_i + omega*t)*(j_x + a_y*omega))/omega^2 - (t*sin(theta_i + omega*t)*(j_y - a_x*omega))/omega^2 + (j_y*t^2*cos(theta_i + omega*t))/(2*omega) + ...
+            (j_x*t^2*sin(theta_i + omega*t))/(2*omega);
+        pose(2) = K2 + (cos(theta_i + omega*t)*(- v_x_i*omega^2 + a_y*omega + j_x))/omega^3 + (sin(theta_i + omega*t)*(v_y_i*omega^2 + a_x*omega - j_y))/omega^3 + ...
+            (t*cos(theta_i + omega*t)*(j_y - a_x*omega))/omega^2 + (t*sin(theta_i + omega*t)*(j_x + a_y*omega))/omega^2 - (j_x*t^2*cos(theta_i + omega*t))/(2*omega) + ...
+            (j_y*t^2*sin(theta_i + omega*t))/(2*omega);
+        pose(3) = iniPose(3) + omega * t;
+    elseif all(A == 0) && all(J == 0)
+        % Constant velocity
+        k1 = iniPose(1) - (V(1)*sin(iniPose(3)) + V(2)*cos(iniPose(3)))/V(3);
+        k2 = iniPose(2) - (-V(1)*cos(iniPose(3)) + V(2)*sin(iniPose(3)))/V(3);
+        pose(1) = k1 + (V(1)*sin(iniPose(3) + V(3)*t) + V(2)*cos(iniPose(3) + V(3)*t))/V(3);
+        pose(2) = k2 + (-V(1)*cos(iniPose(3) + V(3)*t) + V(2)*sin(iniPose(3) + V(3)*t))/V(3);
+        pose(3) = iniPose(3) + V(3) * t;
+    else
+        % General case with acceleration and/or jerk
+        pose(1:2) = integral(@(x) globalVelocity(x, iniPose(3), V, A, J), 0, t, 'ArrayValued', true) + iniPose(1:2);
+        pose(3) = iniPose(3) + V(3) * t + A(3) * t^2 / 2 + J(3) * t^3 / 6;
+    end
 end
 
 function Vg = globalVelocity(t, theta_i, V, A, J)
