@@ -1,4 +1,4 @@
-classdef SimuMove < matlab.apps.AppBase
+classdef TrackGen < matlab.apps.AppBase
 
     % Properties that correspond to app components
     properties (Access = public)
@@ -221,7 +221,7 @@ classdef SimuMove < matlab.apps.AppBase
             else
                 app.UIFigure.Position = [100 100 1280 720];
             end
-            app.UIFigure.Name = 'SimuMove App';
+            app.UIFigure.Name = 'TrackGen App';
             app.UIFigure.SizeChangedFcn = createCallbackFcn(app, @updateAppLayout, true);
 
             if strcmp(theme(app.UIFigure).BaseColorStyle, 'dark')
@@ -664,7 +664,7 @@ classdef SimuMove < matlab.apps.AppBase
 
         function ID = addCommandPanel(app, tab, type, varargin)
             arguments
-                app     (1,1)   SimuMove
+                app     (1,1)   TrackGen
                 tab     (1,1)   matlab.ui.container.Tab
                 type    {mustBeTextScalar} = 'Move Command'
             end
@@ -1810,7 +1810,7 @@ classdef SimuMove < matlab.apps.AppBase
     methods (Access = public)
 
         % Construct app
-        function app = SimuMove
+        function app = TrackGen
 
             app.updateKinematicMatrix();
 
