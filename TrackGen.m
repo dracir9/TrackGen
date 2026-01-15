@@ -15,6 +15,9 @@ classdef TrackGen < matlab.apps.AppBase
         TabGroup2            matlab.ui.container.TabGroup
         TrajectoryPlotTab    matlab.ui.container.Tab
         LocalKinematicsTab   matlab.ui.container.Tab
+        startTimeField       matlab.ui.control.NumericEditField
+        timeSlider           matlab.ui.control.RangeSlider
+        endTimeField         matlab.ui.control.NumericEditField
         TrajectoryAxes       matlab.graphics.axis.Axes
         JerkAxes             matlab.graphics.axis.Axes
         AccelAxes            matlab.graphics.axis.Axes
@@ -35,6 +38,9 @@ classdef TrackGen < matlab.apps.AppBase
                 'AddButton', [], 'RemoveButton', []);
 
         sampleTime = 0.005; % Sample time for simulation (s)
+
+        timeVector  (:,1)   double = []; % Time vector for simulation (s)
+        simulationData      struct  = struct('globalState', {}, 'wheelVelocities', {}); % Structure to hold simulation data
 
         % Omnidirectional robot parameters
         wheelRadius     (1,3)   double  = [0.15, 0.15, 0.15];       % Wheel radii (m)
@@ -100,12 +106,20 @@ classdef TrackGen < matlab.apps.AppBase
         % Button pushed function: GenerateButton
         function GenerateButtonPushed(app, ~)
             try
+                app.timeVector = [];
+
                 % Generate trajectories for all trajectory tabs
                 for i = 1:length(app.trajectories)
                     if ~isempty(app.trajectories(i))
                         app.generateTrajectory(i);
                     end
                 end
+
+                % Update time window
+                app.updateTimeWindow();
+
+                % Update plots
+                app.updatePlots();
             catch ME
                 report = getReport(ME);
                 uialert(app.UIFigure, sprintf('Error generating trajectory:\n%s', report), ...
@@ -201,6 +215,33 @@ classdef TrackGen < matlab.apps.AppBase
             app.IK = [cos(epsilon(1)) * 60/(2*pi*app.wheelRadius(1)), sin(epsilon(1)) * 60/(2*pi*app.wheelRadius(1)), app.robotRadius(1) * 60/(2*pi*app.wheelRadius(1));
                       cos(epsilon(2)) * 60/(2*pi*app.wheelRadius(2)), sin(epsilon(2)) * 60/(2*pi*app.wheelRadius(2)), app.robotRadius(2) * 60/(2*pi*app.wheelRadius(2));
                       cos(epsilon(3)) * 60/(2*pi*app.wheelRadius(3)), sin(epsilon(3)) * 60/(2*pi*app.wheelRadius(3)), app.robotRadius(3) * 60/(2*pi*app.wheelRadius(3))];
+        end
+
+        function updateTimeFieldsFromSlider(app, updatePlot)
+            app.startTimeField.Value = app.timeSlider.Value(1);
+            app.endTimeField.Value = app.timeSlider.Value(2);
+
+            if updatePlot
+                app.updatePlots();
+            end
+        end
+
+        function updateTimeSliderFromFields(app)
+            minTime = round(app.startTimeField.Value/0.1)*0.1;
+            maxTime = round(app.endTimeField.Value/0.1)*0.1;
+
+            if app.startTimeField.Value > app.timeSlider.Value(2)
+                maxTime = minTime;
+            end
+            if app.endTimeField.Value < app.timeSlider.Value(1)
+                minTime = maxTime;
+            end
+            app.timeSlider.Value = [minTime, maxTime];
+
+            app.startTimeField.Value = minTime;
+            app.endTimeField.Value = maxTime;
+
+            app.updatePlots();
         end
     end
 
@@ -322,12 +363,14 @@ classdef TrackGen < matlab.apps.AppBase
         function createAxes(app)
             % Create TrajectoryAxes
             trajctoryGrid = uigridlayout(app.TrajectoryPlotTab);
-            trajctoryGrid.ColumnWidth = {'1x'};
-            trajctoryGrid.RowHeight = {'1x'};
+            trajctoryGrid.ColumnWidth = {50, '1x', 50};
+            trajctoryGrid.RowHeight = {'1x', 'fit'};
             trajctoryGrid.Padding = [5 5 5 5];
 
             % Create TrajectoryAxes
             app.TrajectoryAxes = uiaxes(trajctoryGrid);
+            app.TrajectoryAxes.Layout.Row = 1;
+            app.TrajectoryAxes.Layout.Column = [1 3];
             title(app.TrajectoryAxes, 'Trajectory Plot')
             xlabel(app.TrajectoryAxes, 'X [m]')
             ylabel(app.TrajectoryAxes, 'Y [m]')
@@ -335,7 +378,33 @@ classdef TrackGen < matlab.apps.AppBase
             grid(app.TrajectoryAxes, 'minor');
             box(app.TrajectoryAxes, 'on');
             axis(app.TrajectoryAxes, 'equal');
-            addlistener(app.TrajectoryAxes, 'OuterPositionChanged', @(src, evt) app.updateAspectRatios());
+            % addlistener(app.TrajectoryAxes, 'OuterPositionChanged', @(src, evt) app.updateAspectRatios());
+
+            app.startTimeField = uieditfield(trajctoryGrid, 'numeric');
+            app.startTimeField.Layout.Row = 2;
+            app.startTimeField.Layout.Column = 1;
+            app.startTimeField.Value = 0;
+            app.startTimeField.Limits = [0 10];
+            app.startTimeField.UpperLimitInclusive = 'off';
+            app.startTimeField.ValueDisplayFormat = '%11.4g s';
+            app.startTimeField.ValueChangedFcn = @(s,e) app.updateTimeSliderFromFields();
+
+            app.timeSlider = uislider(trajctoryGrid, "range");
+            app.timeSlider.Layout.Row = 2;
+            app.timeSlider.Layout.Column = 2;
+            app.timeSlider.Limits = [0 10];
+            app.timeSlider.Step = 0.05;
+            app.timeSlider.ValueChangedFcn = @(s,e) app.updateTimeFieldsFromSlider(true);
+            app.timeSlider.ValueChangingFcn = @(s,e) app.updateTimeFieldsFromSlider(false);
+
+            app.endTimeField = uieditfield(trajctoryGrid, 'numeric');
+            app.endTimeField.Layout.Row = 2;
+            app.endTimeField.Layout.Column = 3;
+            app.endTimeField.Value = 10;
+            app.endTimeField.Limits = [0 10];
+            app.endTimeField.LowerLimitInclusive = 'off';
+            app.endTimeField.ValueDisplayFormat = '%11.4g s';
+            app.endTimeField.ValueChangedFcn = @(s,e) app.updateTimeSliderFromFields();
 
             % Create grid for Local Kinematics tab
             kinematicsGrid = uigridlayout(app.LocalKinematicsTab);
@@ -1132,6 +1201,33 @@ classdef TrackGen < matlab.apps.AppBase
             end
         end
 
+        function updateTimeWindow(app)
+            if isempty(app.timeVector)
+                app.timeSlider.Limits = [0 10];
+                app.timeSlider.Value = [0 10];
+            else
+                newLimits = ceil([0 app.timeVector(end)]/0.01)*0.01; % Round up to nearest 0.01s
+                
+
+                if newLimits(2) ~= app.timeSlider.Limits(2)
+                    app.timeSlider.Limits = newLimits;
+                    app.timeSlider.Value = newLimits;
+
+                    % Fix bug with auto major ticks between 20 and 29 seconds
+                    if newLimits(2) >= 20 && newLimits(2) < 29
+                        app.timeSlider.MajorTicks = 0:1:newLimits(2);
+                    else
+                        app.timeSlider.MajorTicksMode = 'auto';
+                    end
+                end
+            end
+            
+            app.startTimeField.Limits = app.timeSlider.Limits;
+            app.startTimeField.Value = app.timeSlider.Value(1);
+            app.endTimeField.Limits = app.timeSlider.Limits;
+            app.endTimeField.Value = app.timeSlider.Value(2);
+        end
+
         function plots = initializePlots(app, trajectoryID)
             % Initialize plot handles for trajectory visualization
             hold(app.TrajectoryAxes, 'on');
@@ -1191,42 +1287,55 @@ classdef TrackGen < matlab.apps.AppBase
             plots.WheelCPlot.Annotation.LegendInformation.IconDisplayStyle = 'off';         % Hide from legend
         end
 
-        function updatePlots(app, trajectoryID, time, stateData, wheelData)
-            plots = app.trajectories(trajectoryID).Plots;
+        function updatePlots(app)
+            for ii = 1:length(app.trajectories)
+                if isempty(app.trajectories(ii).Plots) || ii > length(app.simulationData)
+                    continue;
+                end
 
-            % % Update trajectory plots
-            set(plots.TrajectoryPlot, 'XData', stateData(:, 1, 1), 'YData', stateData(:, 2, 1));
-            [xp, yp, xdir, ydir] = drawOrientation(stateData(:, :, 1), stateData(:, 1:2, 2), time, 0.5, 0.05, 0.1);
-            set(plots.PositionPlot, 'XData', xp, 'YData', yp);
-            set(plots.OrientationPlot, 'XData', xdir, 'YData', ydir);
+                plots = app.trajectories(ii).Plots;
+                data = app.simulationData(ii);
+                stateData = data.globalState;
+                wheelData = data.wheelVelocities;
+                time = app.timeVector(1:size(stateData, 1));
 
-            % Update jerk plots
-            set(plots.JerkXPlot, 'XData', time, 'YData', stateData(:, 1, 4));
-            set(plots.JerkYPlot, 'XData', time, 'YData', stateData(:, 2, 4));
-            set(plots.JerkOPlot, 'XData', time, 'YData', stateData(:, 3, 4));
-            homeAxis(app.JerkAxes, [nan, 0]);
-            zoom(app.JerkAxes, 'reset');
+                drawIdx = time > app.timeSlider.Value(1) & time < app.timeSlider.Value(2);
 
-            % Update acceleration plots
-            set(plots.AccelXPlot, 'XData', time, 'YData', stateData(:, 1, 3));
-            set(plots.AccelYPlot, 'XData', time, 'YData', stateData(:, 2, 3));
-            set(plots.AccelOPlot, 'XData', time, 'YData', stateData(:, 3, 3));
-            homeAxis(app.AccelAxes, [nan, 0]);
-            zoom(app.AccelAxes, 'reset');
+                % Update trajectory plots
+                set(plots.TrajectoryPlot, 'XData', stateData(drawIdx, 1, 1), 'YData', stateData(drawIdx, 2, 1));
+                [xp, yp, xdir, ydir] = drawOrientation(stateData(drawIdx, :, 1), stateData(drawIdx, 1:2, 2), time(drawIdx), 0.5, 0.05, 0.1);
+                set(plots.PositionPlot, 'XData', xp, 'YData', yp);
+                set(plots.OrientationPlot, 'XData', xdir, 'YData', ydir);
+                axis(app.TrajectoryAxes, 'equal');
 
-            % Update velocity plots
-            set(plots.VelocityXPlot, 'XData', time, 'YData', stateData(:, 1, 2));
-            set(plots.VelocityYPlot, 'XData', time, 'YData', stateData(:, 2, 2));
-            set(plots.VelocityOPlot, 'XData', time, 'YData', stateData(:, 3, 2));
-            homeAxis(app.VelocityAxes, [nan, 0]);
-            zoom(app.VelocityAxes, 'reset');
+                % Update jerk plots
+                set(plots.JerkXPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 1, 4));
+                set(plots.JerkYPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 2, 4));
+                set(plots.JerkOPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 3, 4));
+                homeAxis(app.JerkAxes, [nan, 0]);
+                zoom(app.JerkAxes, 'reset');
 
-            % Update wheel velocity plots
-            set(plots.WheelAPlot, 'XData', time, 'YData', wheelData(:, 1));
-            set(plots.WheelBPlot, 'XData', time, 'YData', wheelData(:, 2));
-            set(plots.WheelCPlot, 'XData', time, 'YData', wheelData(:, 3));
-            homeAxis(app.WheelVelAxes);
-            zoom(app.WheelVelAxes, 'reset');
+                % Update acceleration plots
+                set(plots.AccelXPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 1, 3));
+                set(plots.AccelYPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 2, 3));
+                set(plots.AccelOPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 3, 3));
+                homeAxis(app.AccelAxes, [nan, 0]);
+                zoom(app.AccelAxes, 'reset');
+
+                % Update velocity plots
+                set(plots.VelocityXPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 1, 2));
+                set(plots.VelocityYPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 2, 2));
+                set(plots.VelocityOPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 3, 2));
+                homeAxis(app.VelocityAxes, [nan, 0]);
+                zoom(app.VelocityAxes, 'reset');
+
+                % Update wheel velocity plots
+                set(plots.WheelAPlot, 'XData', time(drawIdx), 'YData', wheelData(drawIdx, 1));
+                set(plots.WheelBPlot, 'XData', time(drawIdx), 'YData', wheelData(drawIdx, 2));
+                set(plots.WheelCPlot, 'XData', time(drawIdx), 'YData', wheelData(drawIdx, 3));
+                homeAxis(app.WheelVelAxes);
+                zoom(app.WheelVelAxes, 'reset');
+            end
 
             function [xi, yi, x, y] = drawOrientation(pose, velocity, time, Ts, minLen, scale)
                 % Draw orientation arrows at sample time intervals
@@ -1604,8 +1713,14 @@ classdef TrackGen < matlab.apps.AppBase
             % Simulate trajectory
             [timeVec, stateVec, wheelVelVec] = app.simulateTrajectory(setpoints, initPos);
 
-            % Update plots
-            app.updatePlots(trajectoryID, timeVec, stateVec, wheelVelVec);
+            % Store simulation data
+            app.simulationData(trajectoryID).globalState = stateVec;
+            app.simulationData(trajectoryID).wheelVelocities = wheelVelVec;
+
+            % Merge time vector
+            if length(timeVec) > length(app.timeVector)
+                app.timeVector = timeVec;
+            end
         end
 
         function commands = extractCommands(app, trajectoryID, initPos, Tacc, Tj, minCmdTime)
