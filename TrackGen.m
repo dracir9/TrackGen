@@ -15,14 +15,16 @@ classdef TrackGen < matlab.apps.AppBase
         TabGroup2            matlab.ui.container.TabGroup
         TrajectoryPlotTab    matlab.ui.container.Tab
         LocalKinematicsTab   matlab.ui.container.Tab
-        startTimeField       matlab.ui.control.NumericEditField
-        timeSlider           matlab.ui.control.RangeSlider
-        endTimeField         matlab.ui.control.NumericEditField
+        LocalPathTab         matlab.ui.container.Tab
         TrajectoryAxes       matlab.graphics.axis.Axes
+        LocalPathAxes        matlab.graphics.axis.Axes
         JerkAxes             matlab.graphics.axis.Axes
         AccelAxes            matlab.graphics.axis.Axes
         VelocityAxes         matlab.graphics.axis.Axes
         WheelVelAxes         matlab.graphics.axis.Axes
+        startTimeField       matlab.ui.control.NumericEditField
+        timeSlider           matlab.ui.control.RangeSlider
+        endTimeField         matlab.ui.control.NumericEditField
     end
 
     % Private properties that store app data
@@ -40,7 +42,7 @@ classdef TrackGen < matlab.apps.AppBase
         sampleTime = 0.005; % Sample time for simulation (s)
 
         timeVector  (:,1)   double = []; % Time vector for simulation (s)
-        simulationData      struct  = struct('globalState', {}, 'wheelVelocities', {}); % Structure to hold simulation data
+        simulationData      struct  = struct('globalState', {}, 'localPath', {}, 'wheelVelocities', {}); % Structure to hold simulation data
 
         % Omnidirectional robot parameters
         wheelRadius     (1,3)   double  = [0.15, 0.15, 0.15];       % Wheel radii (m)
@@ -350,6 +352,10 @@ classdef TrackGen < matlab.apps.AppBase
             app.LocalKinematicsTab = uitab(app.TabGroup2);
             app.LocalKinematicsTab.Title = 'Local Kinematics';
 
+            % Create LocalPathTab
+            app.LocalPathTab = uitab(app.TabGroup2);
+            app.LocalPathTab.Title = 'Local Path';
+
             % Create axes and tabs
             app.createAxes();
 
@@ -505,6 +511,22 @@ classdef TrackGen < matlab.apps.AppBase
             plot(app.WheelVelAxes, NaN, NaN, 'Color', lgdColor, 'LineWidth', 2, 'LineStyle', '--', 'DisplayName', 'Wheel B');
             plot(app.WheelVelAxes, NaN, NaN, 'Color', lgdColor, 'LineWidth', 2, 'LineStyle', ':', 'DisplayName', 'Wheel C');
             hold(app.WheelVelAxes, 'off');
+
+            % Create LocalPathAxes
+            localPathGrid = uigridlayout(app.LocalPathTab);
+            localPathGrid.ColumnWidth = {'1x'};
+            localPathGrid.RowHeight = {'1x'};
+            localPathGrid.Padding = [5 5 5 5];
+            
+            % Create LocalPathAxes
+            app.LocalPathAxes = uiaxes(localPathGrid);
+            title(app.LocalPathAxes, 'Local Path Plot')
+            xlabel(app.LocalPathAxes, 'X [m]')
+            ylabel(app.LocalPathAxes, 'Y [m]')
+            grid(app.LocalPathAxes, 'on');
+            grid(app.LocalPathAxes, 'minor');
+            box(app.LocalPathAxes, 'on');
+            axis(app.LocalPathAxes, 'equal');
         end
 
         function ID = addTrajectoryTab(app)
@@ -1241,6 +1263,13 @@ classdef TrackGen < matlab.apps.AppBase
             plots.PositionPlot.Annotation.LegendInformation.IconDisplayStyle = 'off';       % Hide from legend
             plots.OrientationPlot.Annotation.LegendInformation.IconDisplayStyle = 'off';    % Hide from legend
 
+            hold(app.LocalPathAxes, 'on');
+            plots.localRefPlot = plot(app.LocalPathAxes, NaN, NaN, 'Color', plots.TrajRefPlot.Color, ...
+                'LineWidth', 2, 'DisplayName', sprintf('Trajectory %d', trajectoryID));
+            plots.localPathPlot = plot(app.LocalPathAxes, NaN, NaN, '-', 'Color', plots.localRefPlot.Color);
+            hold(app.LocalPathAxes, 'off');
+            plots.localPathPlot.Annotation.LegendInformation.IconDisplayStyle = 'off';      % Hide from legend
+
             % Initialize plots for trajectory jerk
             hold(app.JerkAxes, 'on');
             yyaxis(app.JerkAxes, 'left');
@@ -1297,9 +1326,10 @@ classdef TrackGen < matlab.apps.AppBase
                 data = app.simulationData(ii);
                 stateData = data.globalState;
                 wheelData = data.wheelVelocities;
+                localPos = data.localPath;
                 time = app.timeVector(1:size(stateData, 1));
 
-                drawIdx = time > app.timeSlider.Value(1) & time < app.timeSlider.Value(2);
+                drawIdx = time >= app.timeSlider.Value(1) & time < app.timeSlider.Value(2);
 
                 % Update trajectory plots
                 set(plots.TrajectoryPlot, 'XData', stateData(drawIdx, 1, 1), 'YData', stateData(drawIdx, 2, 1));
@@ -1307,6 +1337,8 @@ classdef TrackGen < matlab.apps.AppBase
                 set(plots.PositionPlot, 'XData', xp, 'YData', yp);
                 set(plots.OrientationPlot, 'XData', xdir, 'YData', ydir);
                 axis(app.TrajectoryAxes, 'equal');
+
+                set(plots.localPathPlot, 'XData', localPos(drawIdx, 1), 'YData', localPos(drawIdx, 2));
 
                 % Update jerk plots
                 set(plots.JerkXPlot, 'XData', time(drawIdx), 'YData', stateData(drawIdx, 1, 4));
@@ -1711,10 +1743,11 @@ classdef TrackGen < matlab.apps.AppBase
             setpoints = app.generateSetpoints(commands, Tacc, Tj);
 
             % Simulate trajectory
-            [timeVec, stateVec, wheelVelVec] = app.simulateTrajectory(setpoints, initPos);
+            [timeVec, stateVec, wheelVelVec, localPath] = app.simulateTrajectory(setpoints, initPos);
 
             % Store simulation data
             app.simulationData(trajectoryID).globalState = stateVec;
+            app.simulationData(trajectoryID).localPath = localPath;
             app.simulationData(trajectoryID).wheelVelocities = wheelVelVec;
 
             % Merge time vector
@@ -1847,7 +1880,7 @@ classdef TrackGen < matlab.apps.AppBase
             end
         end
         
-        function [timeVec, stateVec, wheelVelVec] = simulateTrajectory(app, setpoints, initPos)
+        function [timeVec, stateVec, wheelVelVec, localPath] = simulateTrajectory(app, setpoints, initPos)
             % Simulate trajectory based on setpoints using Euler integration
 
             Ts = app.sampleTime;
@@ -1856,6 +1889,8 @@ classdef TrackGen < matlab.apps.AppBase
             timeVec = (0:Ts:(numSteps-1)*Ts)';
 
             stateVec = zeros(numSteps, 3, 4); % [x/y/theta, vx/vy/omega, ax/ay/alpha, jx/jy/psi]
+            localPath = zeros(numSteps, 2); % [x_local, y_local]
+            localIPos = zeros(1, 2); % Initial local position
             
             % Shift times to center of sample period to avoid rounding errors
             refTime = setpoints(:, end) - Ts/2; 
@@ -1898,9 +1933,15 @@ classdef TrackGen < matlab.apps.AppBase
                 stateVec(idx, 2, 1) = yg(1:end-1);
 
                 initPos = [xg(end), yg(end), theta_f]; % Update initial position for next segment
+
+                localPath(idx, 1) = localIPos(1) + setpoints(i, 1) .* sectionTime + setpoints(i, 4) .* sectionTime.^2/2 + setpoints(i, 7) .* sectionTime.^3/6; % x_local
+                localPath(idx, 2) = localIPos(2) + setpoints(i, 2) .* sectionTime + setpoints(i, 5) .* sectionTime.^2/2 + setpoints(i, 8) .* sectionTime.^3/6; % y_local
+                localIPos(1) = localIPos(1) + setpoints(i, 1) * Tend + setpoints(i, 4) * Tend^2 / 2 + setpoints(i, 7) * Tend^3 / 6;
+                localIPos(2) = localIPos(2) + setpoints(i, 2) * Tend + setpoints(i, 5) * Tend^2 / 2 + setpoints(i, 8) * Tend^3 / 6;
             end
 
             stateVec(end, :, 1) = initPos; % Set final position
+            localPath(end, :) = localIPos; % Set final local position
 
             wheelVelVec = app.inverseKinematics(stateVec(:, :, 2)')'; % Compute wheel velocities
         end
