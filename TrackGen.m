@@ -1333,7 +1333,14 @@ classdef TrackGen < matlab.apps.AppBase
 
                 % Update trajectory plots
                 set(plots.TrajectoryPlot, 'XData', stateData(drawIdx, 1, 1), 'YData', stateData(drawIdx, 2, 1));
-                [xp, yp, xdir, ydir] = drawOrientation(stateData(drawIdx, :, 1), stateData(drawIdx, 1:2, 2), time(drawIdx), 0.5, 0.05, 0.1);
+                if any(drawIdx)
+                    [xp, yp, xdir, ydir] = drawOrientation(stateData(drawIdx, :, 1), stateData(drawIdx, 1:2, 2), time(drawIdx), 0.5, 0.05, 0.1);
+                else
+                    xp = [];
+                    yp = [];
+                    xdir = [];
+                    ydir = [];
+                end
                 set(plots.PositionPlot, 'XData', xp, 'YData', yp);
                 set(plots.OrientationPlot, 'XData', xdir, 'YData', ydir);
                 axis(app.TrajectoryAxes, 'equal');
